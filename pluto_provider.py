@@ -1,16 +1,12 @@
-
 import requests
 import uuid
-import os
+import time
 from datetime import datetime, timedelta, timezone
 
-# =============================
-# CONFIGURATION
-# =============================
-
 STITCHER = "https://cfd-v4-service-channel-stitcher-use1-1.prd.pluto.tv"
+EPG_URL = "https://github.com/matthuisman/i.mjh.nz/raw/master/PlutoTV/all.xml.gz"
+OUTPUT_FILE = "pluto_global.m3u"
 
-# Order: English countries first, then alphabetical
 REGIONS = {
     "United States": "108.82.206.181",
     "Canada": "192.206.151.131",
@@ -28,24 +24,13 @@ REGIONS = {
     "Sweden": "192.44.242.19"
 }
 
-EPG_URL = "https://github.com/matthuisman/i.mjh.nz/raw/master/PlutoTV/all.xml.gz"
-
-# =============================
-# TIME FORMAT
-# =============================
-
 def format_time(dt):
     return dt.replace(minute=0, second=0, microsecond=0) \
              .isoformat() \
              .replace("+00:00", "Z")
 
-# =============================
-# AUTHENTICATION
-# =============================
-
-def authenticate(region_ip):
+def start_session(region_ip):
     device_id = str(uuid.uuid4())
-
     headers = {
         "User-Agent": "Mozilla/5.0",
         "X-Forwarded-For": region_ip,
@@ -65,40 +50,21 @@ def authenticate(region_ip):
         "&clientModelNumber=1.0.0"
         "&serverSideAds=false"
         "&drmCapabilities=widevine:L3"
-        f"&username={USERNAME}"
-        f"&password={PASSWORD}"
     )
 
     r = requests.get(boot_url, headers=headers, timeout=30)
     data = r.json()
-
     return data.get("sessionToken"), data.get("stitcherParams", ""), headers
-
-# =============================
-# FETCH CHANNELS
-# =============================
 
 def fetch_channels(headers):
     now = datetime.now(timezone.utc)
     later = now + timedelta(hours=6)
-
     start = format_time(now)
     stop = format_time(later)
-
     url = f"https://api.pluto.tv/v2/channels?start={start}&stop={stop}"
-
     r = requests.get(url, headers=headers, timeout=30)
     data = r.json()
-
-    if not isinstance(data, list):
-        print("Unexpected API response:", data)
-        return []
-
-    return data
-
-# =============================
-# BUILD PLAYLIST
-# =============================
+    return data if isinstance(data, list) else []
 
 def build_playlist():
     playlist = f'#EXTM3U url-tvg="{EPG_URL}"\n\n'
@@ -106,22 +72,26 @@ def build_playlist():
     for country_name, ip in REGIONS.items():
         print(f"Generating {country_name} channels...")
 
-        token, stitcher_params, headers = authenticate(ip)
+        token, stitcher_params, headers = start_session(ip)
+        channels = []
 
-        if not token:
-            print("Authentication failed:", country_name)
+        if token:
+            channels = fetch_channels(headers)
+
+        valid_channels = [ch for ch in channels if isinstance(ch, dict) and ch.get("isStitched")]
+
+        # If no channels, insert placeholder
+        if not valid_channels:
+            playlist += (
+                f'#EXTINF:-1 group-title="{country_name}" '
+                f'tvg-id="{country_name}-placeholder" '
+                f'tvg-name="No Channels Available" '
+                f'tvg-logo="",No Channels Available\n'
+            )
+            playlist += "http://example.com/blank\n\n"
             continue
 
-        channels = fetch_channels(headers)
-        print(f"{country_name} channel count:", len(channels))
-
-        for ch in channels:
-            if not isinstance(ch, dict):
-                continue
-
-            if not ch.get("isStitched"):
-                continue
-
+        for ch in valid_channels:
             name = ch.get("name", "Unknown")
             slug = ch.get("slug", "")
             logo = ch.get("colorLogoPNG", {}).get("path", "")
@@ -139,27 +109,23 @@ def build_playlist():
                 f'tvg-name="{name}" '
                 f'tvg-logo="{logo}",{name}\n'
             )
-
             playlist += stream_url + "\n\n"
 
     return playlist
 
-# =============================
-# MAIN
-# =============================
+def save_playlist(content):
+    content = content.replace("\r\n", "\n")
+    with open(OUTPUT_FILE, "wb") as f:
+        f.write(content.encode("utf-8"))
+    print(f"Playlist updated: {OUTPUT_FILE}")
 
 def main():
-    m3u = build_playlist()
-
-    # Normalize line endings for IPTV compatibility
-    m3u = m3u.replace("\r\n", "\n")
-
-    with open("pluto_global.m3u", "wb") as f:
-        f.write(m3u.encode("utf-8"))
-
-    print("\nPlaylist created: pluto_global.m3u")
+    while True:
+        print("Starting Pluto TV playlist update...")
+        m3u = build_playlist()
+        save_playlist(m3u)
+        print("Next update in 24 hours...\n")
+        time.sleep(86400)
 
 if __name__ == "__main__":
     main()
-
-
